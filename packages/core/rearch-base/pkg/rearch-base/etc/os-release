@@ -1,0 +1,11 @@
+NAME="ReArch OS"
+PRETTY_NAME="ReArch OS"
+ID=rearch
+ID_LIKE=arch
+BUILD_ID=rolling
+ANSI_COLOR="0;36"
+HOME_URL="https://arch.revy.my.id"
+DOCUMENTATION_URL="https://github.com/revyid/rearch-os/wiki"
+SUPPORT_URL="https://github.com/revyid/rearch-os/issues"
+BUG_REPORT_URL="https://github.com/revyid/rearch-os/issues"
+LOGO=rearch

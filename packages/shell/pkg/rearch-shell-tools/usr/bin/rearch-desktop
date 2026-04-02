@@ -1,0 +1,330 @@
+#!/bin/bash
+#
+# rearch-desktop - Desktop environment manager for ReArch OS
+# Install, switch, and manage desktop environments
+#
+
+set -e
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+NC='\033[0m'
+BOLD='\033[1m'
+
+# Available DEs
+declare -A DES
+DES["xfce"]="XFCE - Lightweight and stable"
+DES["kde"]="KDE Plasma - Feature-rich and customizable"
+DES["gnome"]="GNOME - Modern and user-friendly"
+DES["cinnamon"]="Cinnamon - Traditional desktop"
+DES["mate"]="MATE - Classic GNOME 2"
+DES["lxqt"]="LXQt - Ultra lightweight"
+DES["sway"]="Sway - Wayland tiling"
+DES["hyprland"]="Hyprland - Animated Wayland"
+DES["i3"]="i3 - X11 tiling"
+
+# Logging
+log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+log_section() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
+
+# Show banner
+show_banner() {
+    echo -e "${CYAN}${BOLD}"
+    cat << 'EOF'
+  ___  _____ __  __ ___ _  _ ___
+ |   \| __ \  \/  |_ _| \| / __|
+ | |) |   /| |\/| || || .` \__ \
+ |___/|_|_\|_|  |_|___|_|\_|___/
+EOF
+    echo -e "${NC}"
+    echo -e "${BOLD}Desktop Manager for ReArch OS${NC}\n"
+}
+
+# List available DEs
+list_des() {
+    log_section "Available Desktop Environments"
+    
+    for de in "${!DES[@]}"; do
+        local installed=""
+        if is_installed "$de"; then
+            installed="${GREEN}[Installed]${NC}"
+        fi
+        echo -e "  ${BOLD}$de${NC} - ${DES[$de]} $installed"
+    done
+}
+
+# Check if DE is installed
+is_installed() {
+    local de="$1"
+    
+    case "$de" in
+        xfce) pacman -Q xfce4 &>/dev/null ;;
+        kde) pacman -Q plasma-desktop &>/dev/null ;;
+        gnome) pacman -Q gnome-shell &>/dev/null ;;
+        cinnamon) pacman -Q cinnamon &>/dev/null ;;
+        mate) pacman -Q mate-desktop &>/dev/null ;;
+        lxqt) pacman -Q lxqt-session &>/dev/null ;;
+        sway) pacman -Q sway &>/dev/null ;;
+        hyprland) pacman -Q hyprland &>/dev/null ;;
+        i3) pacman -Q i3-wm &>/dev/null ;;
+        *) return 1 ;;
+    esac
+}
+
+# Install DE
+install_de() {
+    local de="$1"
+    
+    if [[ -z "$de" ]]; then
+        log_error "Please specify desktop environment"
+        return 1
+    fi
+    
+    log_section "Installing $de"
+    
+    case "$de" in
+        xfce)
+            sudo pacman -S xfce4 xfce4-goodies lightdm lightdm-gtk-greeter
+            sudo systemctl enable lightdm
+            ;;
+        kde)
+            sudo pacman -S plasma kde-applications sddm
+            sudo systemctl enable sddm
+            ;;
+        gnome)
+            sudo pacman -S gnome gnome-extra gdm
+            sudo systemctl enable gdm
+            ;;
+        cinnamon)
+            sudo pacman -S cinnamon lightdm lightdm-gtk-greeter
+            sudo systemctl enable lightdm
+            ;;
+        mate)
+            sudo pacman -S mate mate-extra lightdm lightdm-gtk-greeter
+            sudo systemctl enable lightdm
+            ;;
+        lxqt)
+            sudo pacman -S lxqt sddm
+            sudo systemctl enable sddm
+            ;;
+        sway)
+            sudo pacman -S sway swaylock swayidle waybar wofi
+            ;;
+        hyprland)
+            sudo pacman -S hyprland hyprpaper hyprlock hypridle waybar wofi
+            ;;
+        i3)
+            sudo pacman -S i3-wm i3status i3lock i3blocks lightdm lightdm-gtk-greeter
+            sudo systemctl enable lightdm
+            ;;
+        *)
+            log_error "Unknown desktop environment: $de"
+            return 1
+            ;;
+    esac
+    
+    log_success "$de installed"
+    log_info "Reboot to use the new desktop environment"
+}
+
+# Remove DE
+remove_de() {
+    local de="$1"
+    
+    if [[ -z "$de" ]]; then
+        log_error "Please specify desktop environment"
+        return 1
+    fi
+    
+    log_section "Removing $de"
+    
+    read -rp "Are you sure? [y/N]: " confirm
+    [[ "$confirm" != "yes" ]] && return
+    
+    case "$de" in
+        xfce) sudo pacman -Rns xfce4 xfce4-goodies ;;
+        kde) sudo pacman -Rns plasma kde-applications ;;
+        gnome) sudo pacman -Rns gnome gnome-extra ;;
+        cinnamon) sudo pacman -Rns cinnamon ;;
+        mate) sudo pacman -Rns mate mate-extra ;;
+        lxqt) sudo pacman -Rns lxqt ;;
+        sway) sudo pacman -Rns sway swaylock swayidle waybar wofi ;;
+        hyprland) sudo pacman -Rns hyprland hyprpaper hyprlock hypridle waybar wofi ;;
+        i3) sudo pacman -Rns i3-wm i3status i3lock i3blocks ;;
+        *)
+            log_error "Unknown desktop environment: $de"
+            return 1
+            ;;
+    esac
+    
+    log_success "$de removed"
+}
+
+# Show current DE
+show_current() {
+    log_section "Current Desktop Environment"
+    
+    if [[ -n "$XDG_CURRENT_DESKTOP" ]]; then
+        echo -e "${BOLD}Desktop:${NC} $XDG_CURRENT_DESKTOP"
+    elif [[ -n "$DESKTOP_SESSION" ]]; then
+        echo -e "${BOLD}Session:${NC} $DESKTOP_SESSION"
+    else
+        echo "Unable to detect desktop environment"
+    fi
+    
+    echo -e "${BOLD}Display Server:${NC} $XDG_SESSION_TYPE"
+    
+    if [[ -n "$WAYLAND_DISPLAY" ]]; then
+        echo -e "${BOLD}Compositor:${NC} Wayland"
+    elif [[ -n "$DISPLAY" ]]; then
+        echo -e "${BOLD}Display:${NC} X11 ($DISPLAY)"
+    fi
+    
+    # Display manager
+    if systemctl is-active display-manager &>/dev/null; then
+        local dm=$(systemctl status display-manager 2>/dev/null | grep "Loaded:" | awk '{print $2}' | xargs basename)
+        echo -e "${BOLD}Display Manager:${NC} $dm"
+    fi
+}
+
+# Switch DE
+switch_de() {
+    local de="$1"
+    
+    if [[ -z "$de" ]]; then
+        log_error "Please specify desktop environment"
+        return 1
+    fi
+    
+    log_section "Switching to $de"
+    
+    # Check if installed
+    if ! is_installed "$de"; then
+        log_warn "$de is not installed"
+        read -rp "Install it now? [Y/n]: " install
+        if [[ "$install" != "N" && "$install" != "n" ]]; then
+            install_de "$de"
+        else
+            return 1
+        fi
+    fi
+    
+    # Set default session
+    local session=""
+    case "$de" in
+        xfce) session="xfce" ;;
+        kde) session="plasma" ;;
+        gnome) session="gnome" ;;
+        cinnamon) session="cinnamon" ;;
+        mate) session="mate" ;;
+        lxqt) session="lxqt" ;;
+        sway) session="sway" ;;
+        hyprland) session="hyprland" ;;
+        i3) session="i3" ;;
+    esac
+    
+    if [[ -n "$session" ]]; then
+        echo "exec $session" > "$HOME/.xinitrc"
+        log_success "Default session set to $de"
+        log_info "Logout and login again to switch"
+    fi
+}
+
+# List installed DEs
+list_installed() {
+    log_section "Installed Desktop Environments"
+    
+    for de in "${!DES[@]}"; do
+        if is_installed "$de"; then
+            echo "  - $de: ${DES[$de]}"
+        fi
+    done
+}
+
+# Interactive menu
+interactive_menu() {
+    while true; do
+        clear
+        show_banner
+        
+        show_current
+        echo ""
+        
+        echo "Options:"
+        echo "1) List available DEs"
+        echo "2) List installed DEs"
+        echo "3) Install DE"
+        echo "4) Remove DE"
+        echo "5) Switch DE"
+        echo "0) Exit"
+        echo ""
+        
+        read -rp "Select option: " choice
+        
+        case "$choice" in
+            1) list_des; read -n1 -rp "Press any key..." ;;
+            2) list_installed; read -n1 -rp "Press any key..." ;;
+            3)
+                list_des
+                read -rp "DE to install: " de
+                install_de "$de"
+                read -n1 -rp "Press any key..."
+                ;;
+            4)
+                list_installed
+                read -rp "DE to remove: " de
+                remove_de "$de"
+                read -n1 -rp "Press any key..."
+                ;;
+            5)
+                list_des
+                read -rp "DE to switch to: " de
+                switch_de "$de"
+                read -n1 -rp "Press any key..."
+                ;;
+            0) exit 0 ;;
+            *) log_error "Invalid option" ;;
+        esac
+    done
+}
+
+# Usage
+usage() {
+    echo "Usage: rearch-desktop [COMMAND] [OPTIONS]"
+    echo ""
+    echo "Commands:"
+    echo "  list              List available DEs"
+    echo "  installed         List installed DEs"
+    echo "  current           Show current DE"
+    echo "  install DE        Install desktop environment"
+    echo "  remove DE         Remove desktop environment"
+    echo "  switch DE         Switch to DE"
+    echo "  interactive       Interactive menu (default)"
+}
+
+# Main
+main() {
+    show_banner
+    
+    case "${1:-interactive}" in
+        list) list_des ;;
+        installed) list_installed ;;
+        current) show_current ;;
+        install) install_de "$2" ;;
+        remove) remove_de "$2" ;;
+        switch) switch_de "$2" ;;
+        interactive) interactive_menu ;;
+        --help|-h) usage; exit 0 ;;
+        *) log_error "Unknown command: $1"; usage; exit 1 ;;
+    esac
+}
+
+main "$@"

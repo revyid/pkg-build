@@ -1,0 +1,22 @@
+post_install() {
+    echo "==> ReArch OS base system installed."
+    echo "==>"
+    echo "==> Welcome to ReArch OS!"
+    echo "==>"
+    echo "==> Available tools:"
+    echo "==>   rearch-fetch    - System information"
+    echo "==>   rearch-sync     - Update system"
+    echo "==>   rearch-check    - System health check"
+    echo "==>   rearch-clean    - Clean system"
+    echo "==>   rearch-mirrors  - Optimize mirrors"
+    echo "==>"
+    echo "==> Run 'rearch-setup' for post-install configuration."
+    
+    # Apply sysctl settings
+    sysctl --system >/dev/null 2>&1 || true
+}
+
+post_upgrade() {
+    echo "==> ReArch OS base system upgraded."
+    sysctl --system >/dev/null 2>&1 || true
+}

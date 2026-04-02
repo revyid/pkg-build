@@ -1,0 +1,351 @@
+#!/bin/bash
+#
+# rearch-services - Service manager for ReArch OS
+# Simplified systemd service management with user-friendly interface
+#
+
+set -e
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+NC='\033[0m'
+BOLD='\033[1m'
+
+# Logging
+log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+log_section() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
+
+# Show banner
+show_banner() {
+    echo -e "${CYAN}${BOLD}"
+    cat << 'EOF'
+  ___ ___ _   _ ___ _____ ___  ___ ___ ___
+ / __| _ \ | | | _ \_   _/ _ \/ __| __/ __|
+ \__ \   / |_| |  _/ | || (_) \__ \ _|\__ \
+ |___/_|_\\___/|_|   |_| \___/|___/___|___/
+EOF
+    echo -e "${NC}"
+    echo -e "${BOLD}Service Manager for ReArch OS${NC}\n"
+}
+
+# List services
+list_services() {
+    local filter="${1:-all}"
+    
+    log_section "Services"
+    
+    case "$filter" in
+        active)
+            systemctl list-units --type=service --state=running --no-pager --no-legend 2>/dev/null | head -20
+            ;;
+        failed)
+            systemctl list-units --type=service --state=failed --no-pager --no-legend 2>/dev/null
+            ;;
+        enabled)
+            systemctl list-unit-files --type=service --state=enabled --no-pager --no-legend 2>/dev/null | head -20
+            ;;
+        *)
+            systemctl list-units --type=service --no-pager --no-legend 2>/dev/null | head -20
+            ;;
+    esac
+}
+
+# Show service status
+service_status() {
+    local service="$1"
+    
+    if [[ -z "$service" ]]; then
+        log_error "Please specify service name"
+        return 1
+    fi
+    
+    # Add .service suffix if not present
+    [[ "$service" != *.* ]] && service="$service.service"
+    
+    log_section "Service Status: $service"
+    
+    systemctl status "$service" --no-pager 2>/dev/null || {
+        log_error "Service not found: $service"
+        return 1
+    }
+}
+
+# Start service
+start_service() {
+    local service="$1"
+    
+    if [[ -z "$service" ]]; then
+        log_error "Please specify service name"
+        return 1
+    fi
+    
+    [[ "$service" != *.* ]] && service="$service.service"
+    
+    log_info "Starting $service..."
+    sudo systemctl start "$service"
+    log_success "$service started"
+}
+
+# Stop service
+stop_service() {
+    local service="$1"
+    
+    if [[ -z "$service" ]]; then
+        log_error "Please specify service name"
+        return 1
+    fi
+    
+    [[ "$service" != *.* ]] && service="$service.service"
+    
+    log_info "Stopping $service..."
+    sudo systemctl stop "$service"
+    log_success "$service stopped"
+}
+
+# Restart service
+restart_service() {
+    local service="$1"
+    
+    if [[ -z "$service" ]]; then
+        log_error "Please specify service name"
+        return 1
+    fi
+    
+    [[ "$service" != *.* ]] && service="$service.service"
+    
+    log_info "Restarting $service..."
+    sudo systemctl restart "$service"
+    log_success "$service restarted"
+}
+
+# Enable service
+enable_service() {
+    local service="$1"
+    
+    if [[ -z "$service" ]]; then
+        log_error "Please specify service name"
+        return 1
+    fi
+    
+    [[ "$service" != *.* ]] && service="$service.service"
+    
+    log_info "Enabling $service..."
+    sudo systemctl enable "$service"
+    log_success "$service enabled"
+}
+
+# Disable service
+disable_service() {
+    local service="$1"
+    
+    if [[ -z "$service" ]]; then
+        log_error "Please specify service name"
+        return 1
+    fi
+    
+    [[ "$service" != *.* ]] && service="$service.service"
+    
+    log_info "Disabling $service..."
+    sudo systemctl disable "$service"
+    log_success "$service disabled"
+}
+
+# View service logs
+service_logs() {
+    local service="$1"
+    local lines="${2:-50}"
+    
+    if [[ -z "$service" ]]; then
+        log_error "Please specify service name"
+        return 1
+    fi
+    
+    [[ "$service" != *.* ]] && service="$service.service"
+    
+    log_section "Logs for $service (last $lines lines)"
+    
+    journalctl -u "$service" -n "$lines" --no-pager 2>/dev/null || {
+        log_error "Unable to retrieve logs"
+        return 1
+    }
+}
+
+# Follow service logs
+follow_logs() {
+    local service="$1"
+    
+    if [[ -z "$service" ]]; then
+        log_error "Please specify service name"
+        return 1
+    fi
+    
+    [[ "$service" != *.* ]] && service="$service.service"
+    
+    log_info "Following logs for $service (Ctrl+C to exit)..."
+    journalctl -u "$service" -f
+}
+
+# Show failed services
+show_failed() {
+    log_section "Failed Services"
+    
+    local failed=$(systemctl list-units --failed --no-legend --no-pager 2>/dev/null)
+    
+    if [[ -z "$failed" ]]; then
+        log_success "No failed services"
+    else
+        echo "$failed"
+        echo ""
+        log_warn "Run 'rearch-services logs <service>' for details"
+    fi
+}
+
+# Search services
+search_services() {
+    local query="$1"
+    
+    if [[ -z "$query" ]]; then
+        log_error "Please specify search query"
+        return 1
+    fi
+    
+    log_section "Search Results for '$query'"
+    
+    systemctl list-units --type=service --no-pager --no-legend 2>/dev/null | grep -i "$query" || {
+        log_info "No services found matching '$query'"
+    }
+}
+
+# Interactive menu
+interactive_menu() {
+    while true; do
+        clear
+        show_banner
+        
+        # Show quick stats
+        local active_count=$(systemctl list-units --type=service --state=running --no-legend 2>/dev/null | wc -l)
+        local failed_count=$(systemctl list-units --type=service --state=failed --no-legend 2>/dev/null | wc -l)
+        
+        echo -e "Active services: ${GREEN}$active_count${NC}  |  Failed services: ${RED}$failed_count${NC}"
+        echo ""
+        
+        echo "Options:"
+        echo "1) List active services"
+        echo "2) List failed services"
+        echo "3) Show service status"
+        echo "4) Start service"
+        echo "5) Stop service"
+        echo "6) Restart service"
+        echo "7) Enable service"
+        echo "8) Disable service"
+        echo "9) View service logs"
+        echo "10) Follow service logs"
+        echo "11) Search services"
+        echo "0) Exit"
+        echo ""
+        
+        read -rp "Select option: " choice
+        
+        case "$choice" in
+            1) list_services active; read -n1 -rp "Press any key..." ;;
+            2) show_failed; read -n1 -rp "Press any key..." ;;
+            3)
+                read -rp "Service name: " service
+                service_status "$service"
+                read -n1 -rp "Press any key..."
+                ;;
+            4)
+                read -rp "Service name: " service
+                start_service "$service"
+                read -n1 -rp "Press any key..."
+                ;;
+            5)
+                read -rp "Service name: " service
+                stop_service "$service"
+                read -n1 -rp "Press any key..."
+                ;;
+            6)
+                read -rp "Service name: " service
+                restart_service "$service"
+                read -n1 -rp "Press any key..."
+                ;;
+            7)
+                read -rp "Service name: " service
+                enable_service "$service"
+                read -n1 -rp "Press any key..."
+                ;;
+            8)
+                read -rp "Service name: " service
+                disable_service "$service"
+                read -n1 -rp "Press any key..."
+                ;;
+            9)
+                read -rp "Service name: " service
+                service_logs "$service"
+                read -n1 -rp "Press any key..."
+                ;;
+            10)
+                read -rp "Service name: " service
+                follow_logs "$service"
+                ;;
+            11)
+                read -rp "Search query: " query
+                search_services "$query"
+                read -n1 -rp "Press any key..."
+                ;;
+            0) exit 0 ;;
+            *) log_error "Invalid option" ;;
+        esac
+    done
+}
+
+# Usage
+usage() {
+    echo "Usage: rearch-services [COMMAND] [OPTIONS]"
+    echo ""
+    echo "Commands:"
+    echo "  list [active|failed|enabled]  List services"
+    echo "  status SERVICE                Show service status"
+    echo "  start SERVICE                 Start service"
+    echo "  stop SERVICE                  Stop service"
+    echo "  restart SERVICE               Restart service"
+    echo "  enable SERVICE                Enable service"
+    echo "  disable SERVICE               Disable service"
+    echo "  logs SERVICE [LINES]          View service logs"
+    echo "  follow SERVICE                Follow service logs"
+    echo "  failed                        Show failed services"
+    echo "  search QUERY                  Search services"
+    echo "  interactive                   Interactive menu (default)"
+}
+
+# Main
+main() {
+    show_banner
+    
+    case "${1:-interactive}" in
+        list) list_services "$2" ;;
+        status) service_status "$2" ;;
+        start) start_service "$2" ;;
+        stop) stop_service "$2" ;;
+        restart) restart_service "$2" ;;
+        enable) enable_service "$2" ;;
+        disable) disable_service "$2" ;;
+        logs) service_logs "$2" "$3" ;;
+        follow) follow_logs "$2" ;;
+        failed) show_failed ;;
+        search) search_services "$2" ;;
+        interactive) interactive_menu ;;
+        --help|-h) usage; exit 0 ;;
+        *) log_error "Unknown command: $1"; usage; exit 1 ;;
+    esac
+}
+
+main "$@"

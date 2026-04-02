@@ -1,0 +1,53 @@
+# Maintainer: REArch Team <admin@revy.my.id>
+pkgname=rearch-hooks
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Custom mkinitcpio hooks for ReArch OS"
+arch=('any')
+url="https://arch.revy.my.id"
+license=('MIT')
+depends=('mkinitcpio')
+install=rearch-hooks.install
+source=('rearch-hooks.install')
+
+package() {
+    install -dm755 "$pkgdir/etc/initcpio/install"
+    install -dm755 "$pkgdir/etc/initcpio/hooks"
+    
+    # Create custom hooks
+    cat > "$pkgdir/etc/initcpio/install/rearch-logo" << 'EOF'
+#!/bin/bash
+
+build() {
+    add_binary "cat"
+    add_binary "sleep"
+    add_runscript
+}
+
+help() {
+    cat << HELPEOF
+This hook displays the REArch logo during boot.
+HELPEOF
+}
+EOF
+    
+    cat > "$pkgdir/etc/initcpio/hooks/rearch-logo" << 'EOF'
+#!/bin/bash
+
+run_earlyhook() {
+    # Display REArch logo
+    echo ""
+    echo "    ____  _______    ____             __"
+    echo "   / __ \/ ___/ /   / __ \____ ______/ /_"
+    echo "  / /_/ / /  / /   / /_/ / __ \`/ ___/ __ \\"
+    echo " / _, _/ /__/ /___/ _, _/ /_/ (__  ) / / /"
+    echo "/_/ |_|\____/_____/_/ |_|\__,_/____/_/ /_/"
+    echo ""
+    echo "  Loading ReArch OS..."
+    echo ""
+}
+EOF
+    
+    chmod 755 "$pkgdir/etc/initcpio/install/rearch-logo"
+    chmod 755 "$pkgdir/etc/initcpio/hooks/rearch-logo"
+}

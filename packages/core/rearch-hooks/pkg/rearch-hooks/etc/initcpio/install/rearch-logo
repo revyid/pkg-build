@@ -1,0 +1,13 @@
+#!/bin/bash
+
+build() {
+    add_binary "cat"
+    add_binary "sleep"
+    add_runscript
+}
+
+help() {
+    cat << HELPEOF
+This hook displays the REArch logo during boot.
+HELPEOF
+}

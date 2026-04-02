@@ -1,0 +1,10 @@
+post_install() {
+    echo "==> ReArch hooks installed."
+    echo "==> Add 'rearch-logo' to HOOKS in /etc/mkinitcpio.conf to enable."
+    echo "==> Then run 'mkinitcpio -P' to regenerate initramfs."
+}
+
+post_upgrade() {
+    echo "==> ReArch hooks upgraded."
+    echo "==> Run 'mkinitcpio -P' to regenerate initramfs."
+}

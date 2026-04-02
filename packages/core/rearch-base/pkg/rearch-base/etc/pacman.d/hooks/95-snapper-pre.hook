@@ -1,0 +1,11 @@
+[Trigger]
+Operation = Upgrade
+Operation = Install
+Operation = Remove
+Type = Path
+Target = usr/
+
+[Action]
+Depends = snapper
+When = PreTransaction
+Exec = /usr/bin/snapper -c root create -d "Before pacman transaction"

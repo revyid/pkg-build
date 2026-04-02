@@ -1,0 +1,28 @@
+# Maintainer: REArch Team <admin@revy.my.id>
+pkgname=rearch-keyring
+pkgver=2024.04.01
+pkgrel=1
+pkgdesc="ReArch OS PGP keyring"
+arch=('any')
+url="https://arch.revy.my.id"
+license=('GPL')
+install=rearch-keyring.install
+source=('rearch-keyring.install')
+
+package() {
+    install -dm755 "$pkgdir/usr/share/pacman/keyrings"
+    
+    # Create keyring files
+    echo "REArch Keyring" > "$pkgdir/usr/share/pacman/keyrings/rearch-keyring"
+    
+    # Trusted keys list (placeholder - replace with actual keys)
+    cat > "$pkgdir/usr/share/pacman/keyrings/rearch-trusted" << 'EOF'
+# REArch Trusted Keys
+# Add key fingerprints here
+EOF
+    
+    # Revoked keys list
+    cat > "$pkgdir/usr/share/pacman/keyrings/rearch-revoked" << 'EOF'
+# REArch Revoked Keys
+EOF
+}

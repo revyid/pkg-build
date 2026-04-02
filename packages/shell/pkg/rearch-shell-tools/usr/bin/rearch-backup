@@ -1,0 +1,397 @@
+#!/bin/bash
+#
+# rearch-backup - Backup and restore tool for ReArch OS
+# Create, manage, and restore system backups
+#
+
+set -e
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+NC='\033[0m'
+BOLD='\033[1m'
+
+# Configuration
+BACKUP_DIR="${REARCH_BACKUP_DIR:-/var/backups/rearch}"
+CONFIG_FILE="/etc/rearch/backup.conf"
+DATE_FORMAT="%Y%m%d-%H%M%S"
+
+# Logging
+log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+log_section() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
+
+# Show banner
+show_banner() {
+    echo -e "${CYAN}${BOLD}"
+    cat << 'EOF'
+  ___           _     _               _
+ | _ ) ___  ___| |__ | |__  ___ _ __ | |__
+ | _ \/ _ \/ _ \ / / | '_ \/ -_) '  \| / /
+ |___/\___/\___/_\_\ |_.__/\___|_|_|_|_\_\
+EOF
+    echo -e "${NC}"
+    echo -e "${BOLD}Backup Manager for ReArch OS${NC}\n"
+}
+
+# Initialize backup system
+init_backup() {
+    log_section "Initializing Backup System"
+    
+    # Create backup directory
+    sudo mkdir -p "$BACKUP_DIR"
+    sudo mkdir -p /etc/rearch
+    
+    # Create default config
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        sudo tee "$CONFIG_FILE" > /dev/null << 'EOF'
+# ReArch Backup Configuration
+
+# Directories to backup
+BACKUP_PATHS=(
+    "/etc"
+    "/home"
+    "/var/lib/pacman/local"
+    "/usr/local"
+)
+
+# Directories to exclude
+EXCLUDE_PATHS=(
+    "/home/*/.cache"
+    "/home/*/.local/share/Trash"
+    "/var/tmp"
+    "/tmp"
+)
+
+# Backup retention (number of backups to keep)
+RETENTION_COUNT=7
+
+# Compression level (1-9)
+COMPRESSION=6
+EOF
+        log_success "Created default config: $CONFIG_FILE"
+    fi
+    
+    log_success "Backup system initialized"
+}
+
+# Load config
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        source "$CONFIG_FILE"
+    fi
+}
+
+# Create backup
+create_backup() {
+    local name="${1:-backup-$(date +$DATE_FORMAT)}"
+    local backup_path="$BACKUP_DIR/$name"
+    
+    log_section "Creating Backup: $name"
+    
+    load_config
+    
+    # Create backup directory
+    sudo mkdir -p "$backup_path"
+    
+    # Create package list
+    log_info "Creating package list..."
+    pacman -Qqe > /tmp/pacman-pkglist.txt 2>/dev/null || true
+    sudo mv /tmp/pacman-pkglist.txt "$backup_path/"
+    
+    # Create AUR package list
+    if command -v yay &>/dev/null || command -v paru &>/dev/null; then
+        log_info "Creating AUR package list..."
+        pacman -Qqm > /tmp/aur-pkglist.txt 2>/dev/null || true
+        sudo mv /tmp/aur-pkglist.txt "$backup_path/"
+    fi
+    
+    # Backup configurations
+    log_info "Backing up configurations..."
+    local exclude_opts=""
+    for excl in "${EXCLUDE_PATHS[@]}"; do
+        exclude_opts+=" --exclude=$excl"
+    done
+    
+    for path in "${BACKUP_PATHS[@]}"; do
+        if [[ -d "$path" ]]; then
+            log_info "  Backing up: $path"
+            sudo tar czf "$backup_path/$(basename $path).tar.gz" $exclude_opts "$path" 2>/dev/null || {
+                log_warn "Failed to backup: $path"
+            }
+        fi
+    done
+    
+    # Create backup info
+    cat > /tmp/backup-info.txt << EOF
+Backup Name: $name
+Created: $(date)
+Hostname: $(hostname)
+Kernel: $(uname -r)
+EOF
+    sudo mv /tmp/backup-info.txt "$backup_path/"
+    
+    # Create compressed archive
+    log_info "Creating compressed archive..."
+    sudo tar czf "$backup_path.tar.gz" -C "$BACKUP_DIR" "$name" 2>/dev/null
+    sudo rm -rf "$backup_path"
+    
+    # Clean old backups
+    clean_old_backups
+    
+    log_success "Backup created: $backup_path.tar.gz"
+}
+
+# List backups
+list_backups() {
+    log_section "Available Backups"
+    
+    if [[ ! -d "$BACKUP_DIR" ]] || [[ -z "$(ls -A $BACKUP_DIR 2>/dev/null)" ]]; then
+        log_info "No backups found"
+        return
+    fi
+    
+    echo -e "${BOLD}Name                           | Date                | Size${NC}"
+    echo "───────────────────────────────|─────────────────────|───────────"
+    
+    ls -1t "$BACKUP_DIR"/*.tar.gz 2>/dev/null | while read -r backup; do
+        local name=$(basename "$backup" .tar.gz)
+        local date=$(stat -c %y "$backup" 2>/dev/null | cut -d. -f1)
+        local size=$(du -h "$backup" 2>/dev/null | cut -f1)
+        
+        printf "%-30s | %-19s | %s\n" "$name" "$date" "$size"
+    done
+}
+
+# Restore backup
+restore_backup() {
+    local name="$1"
+    
+    if [[ -z "$name" ]]; then
+        log_error "Please specify backup name"
+        return 1
+    fi
+    
+    log_section "Restoring Backup: $name"
+    
+    local backup_file="$BACKUP_DIR/$name.tar.gz"
+    
+    if [[ ! -f "$backup_file" ]]; then
+        log_error "Backup not found: $backup_file"
+        return 1
+    fi
+    
+    log_warn "This will restore files from the backup!"
+    log_warn "Current files may be overwritten!"
+    read -rp "Are you sure? Type 'yes' to continue: " confirm
+    
+    if [[ "$confirm" != "yes" ]]; then
+        log_info "Restore cancelled"
+        return
+    fi
+    
+    # Extract backup
+    local temp_dir="/tmp/rearch-restore-$$"
+    mkdir -p "$temp_dir"
+    
+    log_info "Extracting backup..."
+    tar xzf "$backup_file" -C "$temp_dir"
+    
+    # Restore configurations
+    local backup_path="$temp_dir/$name"
+    
+    for archive in "$backup_path"/*.tar.gz; do
+        if [[ -f "$archive" ]]; then
+            log_info "Restoring: $(basename $archive)"
+            sudo tar xzf "$archive" -C / 2>/dev/null || {
+                log_warn "Failed to restore: $(basename $archive)"
+            }
+        fi
+    done
+    
+    # Restore packages if requested
+    if [[ -f "$backup_path/pacman-pkglist.txt" ]]; then
+        read -rp "Reinstall packages from backup? [y/N]: " install_pkgs
+        if [[ "$install_pkgs" =~ ^[Yy]$ ]]; then
+            log_info "Reinstalling packages..."
+            sudo pacman -S --needed - < "$backup_path/pacman-pkglist.txt" 2>/dev/null || {
+                log_warn "Some packages failed to install"
+            }
+        fi
+    fi
+    
+    # Cleanup
+    rm -rf "$temp_dir"
+    
+    log_success "Restore complete"
+}
+
+# Delete backup
+delete_backup() {
+    local name="$1"
+    
+    if [[ -z "$name" ]]; then
+        log_error "Please specify backup name"
+        return 1
+    fi
+    
+    local backup_file="$BACKUP_DIR/$name.tar.gz"
+    
+    if [[ ! -f "$backup_file" ]]; then
+        log_error "Backup not found: $backup_file"
+        return 1
+    fi
+    
+    read -rp "Delete backup '$name'? [y/N]: " confirm
+    
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        sudo rm -f "$backup_file"
+        log_success "Backup deleted"
+    else
+        log_info "Cancelled"
+    fi
+}
+
+# Clean old backups
+clean_old_backups() {
+    load_config
+    
+    local count=$(ls -1t "$BACKUP_DIR"/*.tar.gz 2>/dev/null | wc -l)
+    
+    if [[ $count -gt $RETENTION_COUNT ]]; then
+        log_info "Cleaning old backups (keeping $RETENTION_COUNT)..."
+        ls -1t "$BACKUP_DIR"/*.tar.gz 2>/dev/null | tail -n +$((RETENTION_COUNT + 1)) | while read -r old_backup; do
+            sudo rm -f "$old_backup"
+        done
+    fi
+}
+
+# Show backup info
+backup_info() {
+    local name="$1"
+    
+    if [[ -z "$name" ]]; then
+        log_error "Please specify backup name"
+        return 1
+    fi
+    
+    local backup_file="$BACKUP_DIR/$name.tar.gz"
+    
+    if [[ ! -f "$backup_file" ]]; then
+        log_error "Backup not found: $backup_file"
+        return 1
+    fi
+    
+    log_section "Backup Information: $name"
+    
+    # Extract and show info
+    local temp_dir="/tmp/rearch-info-$$"
+    mkdir -p "$temp_dir"
+    
+    tar xzf "$backup_file" -C "$temp_dir" "*/backup-info.txt" 2>/dev/null && {
+        cat "$temp_dir"/*/backup-info.txt 2>/dev/null
+    }
+    
+    echo ""
+    echo -e "${BOLD}Size:${NC} $(du -h "$backup_file" | cut -f1)"
+    echo -e "${BOLD}Location:${NC} $backup_file"
+    
+    rm -rf "$temp_dir"
+}
+
+# Interactive menu
+interactive_menu() {
+    while true; do
+        clear
+        show_banner
+        
+        # Show backup stats
+        local backup_count=$(ls -1 "$BACKUP_DIR"/*.tar.gz 2>/dev/null | wc -l)
+        local backup_size=$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1)
+        
+        echo -e "Backups: $backup_count  |  Total size: $backup_size"
+        echo ""
+        
+        echo "Options:"
+        echo "1) Create backup"
+        echo "2) List backups"
+        echo "3) Restore backup"
+        echo "4) Delete backup"
+        echo "5) Backup info"
+        echo "6) Initialize backup system"
+        echo "0) Exit"
+        echo ""
+        
+        read -rp "Select option: " choice
+        
+        case "$choice" in
+            1)
+                read -rp "Backup name (optional): " name
+                create_backup "$name"
+                read -n1 -rp "Press any key..."
+                ;;
+            2) list_backups; read -n1 -rp "Press any key..." ;;
+            3)
+                list_backups
+                read -rp "Backup to restore: " name
+                restore_backup "$name"
+                read -n1 -rp "Press any key..."
+                ;;
+            4)
+                list_backups
+                read -rp "Backup to delete: " name
+                delete_backup "$name"
+                read -n1 -rp "Press any key..."
+                ;;
+            5)
+                list_backups
+                read -rp "Backup name: " name
+                backup_info "$name"
+                read -n1 -rp "Press any key..."
+                ;;
+            6) init_backup; read -n1 -rp "Press any key..." ;;
+            0) exit 0 ;;
+            *) log_error "Invalid option" ;;
+        esac
+    done
+}
+
+# Usage
+usage() {
+    echo "Usage: rearch-backup [COMMAND] [OPTIONS]"
+    echo ""
+    echo "Commands:"
+    echo "  create [NAME]     Create backup"
+    echo "  list              List backups"
+    echo "  restore NAME      Restore backup"
+    echo "  delete NAME       Delete backup"
+    echo "  info NAME         Show backup info"
+    echo "  init              Initialize backup system"
+    echo "  interactive       Interactive menu (default)"
+}
+
+# Main
+main() {
+    show_banner
+    
+    case "${1:-interactive}" in
+        create) create_backup "$2" ;;
+        list) list_backups ;;
+        restore) restore_backup "$2" ;;
+        delete) delete_backup "$2" ;;
+        info) backup_info "$2" ;;
+        init) init_backup ;;
+        interactive) interactive_menu ;;
+        --help|-h) usage; exit 0 ;;
+        *) log_error "Unknown command: $1"; usage; exit 1 ;;
+    esac
+}
+
+main "$@"

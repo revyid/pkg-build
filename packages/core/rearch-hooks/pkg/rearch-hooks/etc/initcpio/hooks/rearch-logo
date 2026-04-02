@@ -1,0 +1,14 @@
+#!/bin/bash
+
+run_earlyhook() {
+    # Display REArch logo
+    echo ""
+    echo "    ____  _______    ____             __"
+    echo "   / __ \/ ___/ /   / __ \____ ______/ /_"
+    echo "  / /_/ / /  / /   / /_/ / __ \`/ ___/ __ \\"
+    echo " / _, _/ /__/ /___/ _, _/ /_/ (__  ) / / /"
+    echo "/_/ |_|\____/_____/_/ |_|\__,_/____/_/ /_/"
+    echo ""
+    echo "  Loading ReArch OS..."
+    echo ""
+}

@@ -1,0 +1,404 @@
+#!/bin/bash
+#
+# rearch-btrfs - Btrfs management tool for ReArch OS
+# Simplified snapshot, subvolume, and filesystem management
+#
+
+set -e
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+NC='\033[0m'
+BOLD='\033[1m'
+
+# Configuration
+BTRFS_MOUNT="/"
+SNAPPER_CONFIG="root"
+
+# Logging
+log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+log_section() { echo -e "\n${CYAN}${BOLD}▶ $1${NC}"; }
+
+# Show banner
+show_banner() {
+    echo -e "${CYAN}${BOLD}"
+    cat << 'EOF'
+  ___ ____  ____ _____ ____   __  __  ___ _____
+ |_ _| __ )| __ )_   _/ ___| |  \/  |/ _ \_   _|
+  | ||  _ \|  _ \ | | \___ \ | |\/| | | | || |
+  | || |_) | |_) || |  ___) || |  | | |_| || |
+ |___|____/|____/ |_| |____/ |_|  |_|\___/ |_|
+EOF
+    echo -e "${NC}"
+    echo -e "${BOLD}Btrfs Manager for ReArch OS${NC}\n"
+}
+
+# Check if running on Btrfs
+check_btrfs() {
+    local fs_type=$(findmnt -n -o FSTYPE / 2>/dev/null)
+    
+    if [[ "$fs_type" != "btrfs" ]]; then
+        log_error "Root filesystem is not Btrfs (found: $fs_type)"
+        exit 1
+    fi
+    
+    log_success "Btrfs filesystem detected"
+}
+
+# Show filesystem info
+show_info() {
+    log_section "Btrfs Filesystem Info"
+    
+    echo -e "${BOLD}Filesystem Usage:${NC}"
+    btrfs filesystem df / 2>/dev/null || echo "  Unable to get info"
+    
+    echo ""
+    echo -e "${BOLD}Device Usage:${NC}"
+    btrfs filesystem show / 2>/dev/null | head -10
+    
+    echo ""
+    echo -e "${BOLD}Compression:${NC}"
+    mount | grep btrfs | grep -o "compress=[^,]*" || echo "  Not specified"
+}
+
+# List subvolumes
+list_subvolumes() {
+    log_section "Subvolumes"
+    
+    echo -e "${BOLD}ID    | Path${NC}"
+    echo "──────|─────────────────────────────"
+    
+    btrfs subvolume list / 2>/dev/null | while read -r line; do
+        local id=$(echo "$line" | awk '{print $2}')
+        local path=$(echo "$line" | awk '{print $9}')
+        printf "%-5s | %s\n" "$id" "$path"
+    done
+}
+
+# Create snapshot
+create_snapshot() {
+    local source="${1:-/}"
+    local name="${2:-snapshot-$(date +%Y%m%d-%H%M%S)}"
+    local dest="/.snapshots/$name"
+    
+    log_section "Creating Snapshot"
+    
+    # Create snapshots directory if it doesn't exist
+    mkdir -p /.snapshots
+    
+    log_info "Source: $source"
+    log_info "Destination: $dest"
+    
+    if btrfs subvolume snapshot -r "$source" "$dest" 2>/dev/null; then
+        log_success "Snapshot created: $dest"
+    else
+        log_error "Failed to create snapshot"
+        return 1
+    fi
+}
+
+# List snapshots
+list_snapshots() {
+    log_section "Snapshots"
+    
+    if command -v snapper &>/dev/null; then
+        # Use snapper if available
+        snapper -c "$SNAPPER_CONFIG" list 2>/dev/null || {
+            log_warn "Snapper not configured, showing raw snapshots"
+            list_snapshots_raw
+        }
+    else
+        list_snapshots_raw
+    fi
+}
+
+# List raw snapshots (without snapper)
+list_snapshots_raw() {
+    if [[ -d /.snapshots ]]; then
+        echo -e "${BOLD}Name                           | Date${NC}"
+        echo "───────────────────────────────|────────────────────"
+        ls -1td /.snapshots/*/ 2>/dev/null | while read -r snap; do
+            local name=$(basename "$snap")
+            local date=$(stat -c %y "$snap" 2>/dev/null | cut -d. -f1)
+            printf "%-30s | %s\n" "$name" "$date"
+        done
+    else
+        log_info "No snapshots directory found"
+    fi
+}
+
+# Delete snapshot
+delete_snapshot() {
+    local snapshot="$1"
+    
+    log_section "Deleting Snapshot"
+    
+    if [[ -z "$snapshot" ]]; then
+        log_error "Please specify snapshot name or number"
+        return 1
+    fi
+    
+    # If it's a number, try to find by snapper
+    if [[ "$snapshot" =~ ^[0-9]+$ ]] && command -v snapper &>/dev/null; then
+        log_info "Deleting snapshot $snapshot via snapper..."
+        snapper -c "$SNAPPER_CONFIG" delete "$snapshot"
+    else
+        # Delete raw snapshot
+        local path="/.snapshots/$snapshot"
+        [[ -d "$path" ]] || path="$snapshot"
+        
+        log_info "Deleting: $path"
+        btrfs subvolume delete "$path" 2>/dev/null || {
+            log_error "Failed to delete snapshot"
+            return 1
+        }
+    fi
+    
+    log_success "Snapshot deleted"
+}
+
+# Restore snapshot
+restore_snapshot() {
+    local snapshot="$1"
+    
+    log_section "Restoring Snapshot"
+    
+    if [[ -z "$snapshot" ]]; then
+        log_error "Please specify snapshot name or number"
+        return 1
+    fi
+    
+    # Find snapshot path
+    local snap_path=""
+    if [[ "$snapshot" =~ ^[0-9]+$ ]] && command -v snapper &>/dev/null; then
+        snap_path=$(snapper -c "$SNAPPER_CONFIG" list 2>/dev/null | grep "^$snapshot" | awk '{print $7}')
+    else
+        snap_path="/.snapshots/$snapshot"
+        [[ -d "$snap_path" ]] || snap_path="$snapshot"
+    fi
+    
+    if [[ ! -d "$snap_path" ]]; then
+        log_error "Snapshot not found: $snapshot"
+        return 1
+    fi
+    
+    log_warn "This will restore your system to the snapshot state!"
+    log_warn "Current system state will be lost!"
+    read -rp "Are you sure? Type 'yes' to continue: " confirm
+    
+    if [[ "$confirm" != "yes" ]]; then
+        log_info "Restore cancelled"
+        return
+    fi
+    
+    # Use snapper undochange if available
+    if [[ "$snapshot" =~ ^[0-9]+$ ]] && command -v snapper &>/dev/null; then
+        snapper -c "$SNAPPER_CONFIG" undochange "$snapshot"
+    else
+        log_info "Manual restore required. Boot from live USB and:"
+        log_info "  1. Mount the btrfs filesystem"
+        log_info "  2. Delete the current @ subvolume"
+        log_info "  3. Create a new @ subvolume from the snapshot"
+    fi
+    
+    log_success "Restore complete"
+}
+
+# Balance filesystem
+balance_fs() {
+    log_section "Balancing Filesystem"
+    
+    log_info "This may take a while..."
+    btrfs balance start -dusage=50 -musage=50 / 2>/dev/null || {
+        log_error "Balance failed or already in progress"
+        return 1
+    }
+    
+    log_success "Balance started"
+    log_info "Run 'btrfs balance status /' to check progress"
+}
+
+# Scrub filesystem
+scrub_fs() {
+    log_section "Scrubbing Filesystem"
+    
+    log_info "Checking data integrity..."
+    btrfs scrub start / 2>/dev/null || {
+        log_error "Scrub failed or already in progress"
+        return 1
+    }
+    
+    log_success "Scrub started"
+    log_info "Run 'btrfs scrub status /' to check progress"
+}
+
+# Defragment
+defrag() {
+    local path="${1:-/}"
+    
+    log_section "Defragmenting"
+    
+    log_info "Defragmenting $path..."
+    btrfs filesystem defragment -r -v "$path" 2>/dev/null || {
+        log_error "Defragmentation failed"
+        return 1
+    }
+    
+    log_success "Defragmentation complete"
+}
+
+# Enable snapper
+enable_snapper() {
+    log_section "Enabling Snapper"
+    
+    if ! command -v snapper &>/dev/null; then
+        log_info "Installing snapper..."
+        sudo pacman -S snapper snap-pac
+    fi
+    
+    # Create config if it doesn't exist
+    if [[ ! -f /etc/snapper/configs/root ]]; then
+        log_info "Creating snapper config..."
+        sudo snapper -c root create-config /
+        
+        # Enable timers
+        sudo systemctl enable --now snapper-timeline.timer
+        sudo systemctl enable --now snapper-cleanup.timer
+        
+        log_success "Snapper enabled with automatic snapshots"
+    else
+        log_info "Snapper already configured"
+    fi
+}
+
+# Show compression stats
+compression_stats() {
+    log_section "Compression Statistics"
+    
+    log_info "Calculating compression ratios..."
+    
+    # Get filesystem usage
+    local raw=$(btrfs filesystem df -b / 2>/dev/null | grep "Data," | grep -oP "size \K[0-9]+" | head -1)
+    local used=$(btrfs filesystem df -b / 2>/dev/null | grep "Data," | grep -oP "used \K[0-9]+" | head -1)
+    
+    if [[ -n "$raw" && -n "$used" && "$used" -gt 0 ]]; then
+        local ratio=$(echo "scale=2; $raw / $used" | bc 2>/dev/null || echo "N/A")
+        echo "  Raw data: $(echo "scale=2; $raw / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "N/A") GB"
+        echo "  Used:     $(echo "scale=2; $used / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "N/A") GB"
+        echo "  Ratio:    ${ratio}x"
+    else
+        log_warn "Unable to calculate compression stats"
+    fi
+}
+
+# Interactive menu
+interactive_menu() {
+    while true; do
+        clear
+        show_banner
+        
+        # Show quick status
+        local fs_usage=$(df -h / | tail -1 | awk '{print $5}')
+        echo -e "Root usage: ${BOLD}$fs_usage${NC}"
+        echo ""
+        
+        echo "Options:"
+        echo "1) Show filesystem info"
+        echo "2) List subvolumes"
+        echo "3) List snapshots"
+        echo "4) Create snapshot"
+        echo "5) Delete snapshot"
+        echo "6) Restore snapshot"
+        echo "7) Balance filesystem"
+        echo "8) Scrub filesystem"
+        echo "9) Defragment"
+        echo "10) Enable snapper"
+        echo "11) Compression stats"
+        echo "0) Exit"
+        echo ""
+        
+        read -rp "Select option: " choice
+        
+        case "$choice" in
+            1) show_info; read -n1 -rp "Press any key..." ;;
+            2) list_subvolumes; read -n1 -rp "Press any key..." ;;
+            3) list_snapshots; read -n1 -rp "Press any key..." ;;
+            4)
+                read -rp "Snapshot name (optional): " name
+                create_snapshot "/" "$name"
+                read -n1 -rp "Press any key..."
+                ;;
+            5)
+                list_snapshots
+                read -rp "Snapshot to delete: " snap
+                delete_snapshot "$snap"
+                read -n1 -rp "Press any key..."
+                ;;
+            6)
+                list_snapshots
+                read -rp "Snapshot to restore: " snap
+                restore_snapshot "$snap"
+                read -n1 -rp "Press any key..."
+                ;;
+            7) balance_fs; read -n1 -rp "Press any key..." ;;
+            8) scrub_fs; read -n1 -rp "Press any key..." ;;
+            9) defrag; read -n1 -rp "Press any key..." ;;
+            10) enable_snapper; read -n1 -rp "Press any key..." ;;
+            11) compression_stats; read -n1 -rp "Press any key..." ;;
+            0) exit 0 ;;
+            *) log_error "Invalid option" ;;
+        esac
+    done
+}
+
+# Usage
+usage() {
+    echo "Usage: rearch-btrfs [COMMAND] [OPTIONS]"
+    echo ""
+    echo "Commands:"
+    echo "  info              Show filesystem info"
+    echo "  subvolumes        List subvolumes"
+    echo "  snapshots         List snapshots"
+    echo "  create [NAME]     Create snapshot"
+    echo "  delete SNAP       Delete snapshot"
+    echo "  restore SNAP      Restore snapshot"
+    echo "  balance           Balance filesystem"
+    echo "  scrub             Scrub filesystem"
+    echo "  defrag            Defragment"
+    echo "  enable-snapper    Enable snapper"
+    echo "  compression       Show compression stats"
+    echo "  interactive       Interactive menu (default)"
+}
+
+# Main
+main() {
+    show_banner
+    check_btrfs
+    
+    case "${1:-interactive}" in
+        info) show_info ;;
+        subvolumes) list_subvolumes ;;
+        snapshots) list_snapshots ;;
+        create) create_snapshot "/" "$2" ;;
+        delete) delete_snapshot "$2" ;;
+        restore) restore_snapshot "$2" ;;
+        balance) balance_fs ;;
+        scrub) scrub_fs ;;
+        defrag) defrag "$2" ;;
+        enable-snapper) enable_snapper ;;
+        compression) compression_stats ;;
+        interactive) interactive_menu ;;
+        --help|-h) usage; exit 0 ;;
+        *) log_error "Unknown command: $1"; usage; exit 1 ;;
+    esac
+}
+
+main "$@"

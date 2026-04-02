@@ -1,0 +1,361 @@
+#!/bin/bash
+#
+# rearch-mirrors - Smart mirror selector and benchmarker for ReArch OS
+# Automatically finds and ranks fastest mirrors based on user's location
+#
+
+set -e
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+NC='\033[0m'
+BOLD='\033[1m'
+
+# Configuration
+MIRRORLIST="/etc/pacman.d/mirrorlist"
+MIRRORLIST_BACKUP="/etc/pacman.d/mirrorlist.backup"
+MIRROR_STATUS_URL="https://archlinux.org/mirrors/status/json/"
+TEMP_DIR="/tmp/rearch-mirrors-$$"
+TOP_MIRRORS=10
+TIMEOUT=10
+COUNTRY=""
+
+# Logging
+log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+# Show banner
+show_banner() {
+    echo -e "${CYAN}${BOLD}"
+    cat << 'EOF'
+  __  __ _                    _
+ |  \/  (_)_ _ _ _ ___ _ _ __| |
+ | |\/| | | '_| '_/ _ \ '_/ _` |
+ |_|  |_|_|_| |_| \___/_| \__,_|
+EOF
+    echo -e "${NC}"
+    echo -e "${BOLD}Smart Mirror Selector for ReArch OS${NC}\n"
+}
+
+# Detect country from IP
+detect_country() {
+    log_info "Detecting location..."
+    
+    # Try multiple geolocation services
+    local country=""
+    
+    # Try ipapi.co
+    country=$(curl -s --max-time 5 https://ipapi.co/country_name/ 2>/dev/null || true)
+    
+    # Fallback to ipinfo.io
+    if [[ -z "$country" ]] || [[ "$country" == *"error"* ]]; then
+        country=$(curl -s --max-time 5 https://ipinfo.io/country 2>/dev/null || true)
+        # Convert country code to name
+        case "$country" in
+            US) country="United States" ;;
+            ID) country="Indonesia" ;;
+            SG) country="Singapore" ;;
+            JP) country="Japan" ;;
+            AU) country="Australia" ;;
+            DE) country="Germany" ;;
+            NL) country="Netherlands" ;;
+            GB) country="United Kingdom" ;;
+            FR) country="France" ;;
+            *) country="" ;;
+        esac
+    fi
+    
+    if [[ -n "$country" ]]; then
+        log_success "Detected country: $country"
+        COUNTRY="$country"
+    else
+        log_warn "Could not detect country automatically"
+    fi
+}
+
+# Fetch mirror list from Arch Linux
+fetch_mirrors() {
+    log_info "Fetching mirror list from Arch Linux..."
+    
+    mkdir -p "$TEMP_DIR"
+    
+    # Download mirror status JSON
+    curl -s --max-time 30 "$MIRROR_STATUS_URL" -o "$TEMP_DIR/mirrors.json" 2>/dev/null || {
+        log_error "Failed to fetch mirror list"
+        exit 1
+    }
+    
+    # Parse mirrors
+    if command -v jq &>/dev/null; then
+        # Use jq for proper JSON parsing
+        if [[ -n "$COUNTRY" ]]; then
+            jq -r --arg country "$COUNTRY" 
+                '.urls[] | select(.country == $country and .protocol == "https" and .completion_pct > 0.9) | "\(.url)|\(.last_sync)|\(.country)"' 
+                "$TEMP_DIR/mirrors.json" > "$TEMP_DIR/mirror_candidates.txt"
+        fi
+        
+        # Also get worldwide mirrors
+        jq -r '.urls[] | select(.protocol == "https" and .completion_pct > 0.95 and .score < 5) | "\(.url)|\(.last_sync)|\(.country)"' 
+            "$TEMP_DIR/mirrors.json" >> "$TEMP_DIR/mirror_candidates.txt"
+    else
+        # Fallback to grep/sed (less reliable)
+        grep -oP '"url":"[^"]+"' "$TEMP_DIR/mirrors.json" | sed 's/"url":"//;s/"$//' | head -100 > "$TEMP_DIR/mirror_candidates.txt"
+    fi
+    
+    # Remove duplicates
+    sort -u "$TEMP_DIR/mirror_candidates.txt" > "$TEMP_DIR/mirrors_unique.txt"
+    mv "$TEMP_DIR/mirrors_unique.txt" "$TEMP_DIR/mirror_candidates.txt"
+    
+    local mirror_count=$(wc -l < "$TEMP_DIR/mirror_candidates.txt")
+    log_success "Found $mirror_count mirror candidates"
+}
+
+# Get mirrors from mirrorlist file
+get_file_mirrors() {
+    if [[ -f "$MIRRORLIST" ]]; then
+        grep -E "^\s*Server\s*=" "$MIRRORLIST" | sed 's/^\s*Server\s*=\s*//' | sed 's/\$repo\/os\/\$arch//' > "$TEMP_DIR/file_mirrors.txt"
+        wc -l < "$TEMP_DIR/file_mirrors.txt"
+    else
+        echo 0
+    fi
+}
+
+# Benchmark mirror speed
+benchmark_mirror() {
+    local mirror="$1"
+    local test_url="${mirror}core/os/x86_64/core.db"
+    
+    # Test download speed
+    local result=$(curl -o /dev/null -s -w "%{time_total},%{speed_download},%{http_code}" --max-time "$TIMEOUT" "$test_url" 2>/dev/null)
+    local time=$(echo "$result" | cut -d, -f1)
+    local speed=$(echo "$result" | cut -d, -f2)
+    local code=$(echo "$result" | cut -d, -f3)
+    
+    if [[ "$code" == "200" ]] && [[ -n "$time" ]]; then
+        # Calculate score (lower is better)
+        local score=$(echo "scale=3; $time * 1000" | bc 2>/dev/null || echo "9999")
+        echo "$score|$mirror|$time|$speed"
+    fi
+}
+
+# Benchmark all mirrors
+benchmark_all() {
+    log_info "Benchmarking mirrors (this may take a while)..."
+    
+    local total=$(wc -l < "$TEMP_DIR/mirror_candidates.txt")
+    local current=0
+    
+    > "$TEMP_DIR/benchmark_results.txt"
+    
+    while IFS='|' read -r mirror last_sync country; do
+        ((current++))
+        echo -ne "\r${BLUE}[INFO]${NC} Testing mirror $current/$total..."
+        
+        # Skip if mirror is too old
+        if [[ -n "$last_sync" ]] && [[ "$last_sync" != "null" ]]; then
+            local sync_time=$(date -d "$last_sync" +%s 2>/dev/null || echo 0)
+            local current_time=$(date +%s)
+            local age_hours=$(((current_time - sync_time) / 3600))
+            
+            if [[ $age_hours -gt 48 ]]; then
+                continue
+            fi
+        fi
+        
+        local result=$(benchmark_mirror "$mirror")
+        if [[ -n "$result" ]]; then
+            echo "$result" >> "$TEMP_DIR/benchmark_results.txt"
+        fi
+    done < "$TEMP_DIR/mirror_candidates.txt"
+    
+    echo ""
+    
+    local tested=$(wc -l < "$TEMP_DIR/benchmark_results.txt")
+    log_success "Successfully tested $tested mirrors"
+}
+
+# Sort and select top mirrors
+select_top_mirrors() {
+    log_info "Selecting top $TOP_MIRRORS mirrors..."
+    
+    # Sort by score (first column)
+    sort -t'|' -k1 -n "$TEMP_DIR/benchmark_results.txt" | head -$TOP_MIRRORS > "$TEMP_DIR/top_mirrors.txt"
+    
+    echo ""
+    echo -e "${CYAN}${BOLD}Top $TOP_MIRRORS Fastest Mirrors:${NC}"
+    echo -e "${BOLD}Rank | Mirror                          | Response Time${NC}"
+    echo "-----|---------------------------------|--------------"
+    
+    local rank=1
+    while IFS='|' read -r score mirror time speed; do
+        local mirror_display=$(echo "$mirror" | sed 's|https://||; s|/$||' | cut -c1-32)
+        printf " %-3d | %-31s | %.3fs\n" "$rank" "$mirror_display" "$time"
+        ((rank++))
+    done < "$TEMP_DIR/top_mirrors.txt"
+}
+
+# Generate new mirrorlist
+generate_mirrorlist() {
+    log_info "Generating new mirrorlist..."
+    
+    # Backup existing mirrorlist
+    if [[ -f "$MIRRORLIST" ]]; then
+        cp "$MIRRORLIST" "$MIRRORLIST_BACKUP"
+        log_info "Backup created: $MIRRORLIST_BACKUP"
+    fi
+    
+    # Generate new mirrorlist
+    {
+        echo "#"
+        echo "# ReArch OS Mirrorlist"
+        echo "# Generated by rearch-mirrors on $(date)"
+        echo "#"
+        echo ""
+        
+        while IFS='|' read -r score mirror time speed; do
+            echo "Server = ${mirror}\$repo/os/\$arch"
+        done < "$TEMP_DIR/top_mirrors.txt"
+        
+        echo ""
+        echo "# Fallback mirrors"
+        echo "Server = https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"
+    } > "$TEMP_DIR/new_mirrorlist"
+    
+    # Show preview
+    echo ""
+    echo -e "${CYAN}${BOLD}New mirrorlist preview:${NC}"
+    head -20 "$TEMP_DIR/new_mirrorlist"
+    echo ""
+}
+
+# Apply mirrorlist
+apply_mirrorlist() {
+    read -rp "Apply new mirrorlist? [y/N]: " confirm
+    
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        sudo cp "$TEMP_DIR/new_mirrorlist" "$MIRRORLIST"
+        log_success "Mirrorlist updated!"
+        
+        # Update pacman database
+        log_info "Updating pacman database..."
+        sudo pacman -Syy
+        
+        log_success "Done! Your system is now using the fastest mirrors."
+    else
+        log_info "Mirrorlist not changed"
+        # Save to home directory for manual application
+        cp "$TEMP_DIR/new_mirrorlist" "$HOME/mirrorlist.new"
+        log_info "New mirrorlist saved to: $HOME/mirrorlist.new"
+    fi
+}
+
+# Interactive country selection
+select_country() {
+    echo ""
+    echo "Select your country/region:"
+    echo "1) Auto-detect"
+    echo "2) United States"
+    echo "3) Indonesia"
+    echo "4) Singapore"
+    echo "5) Japan"
+    echo "6) Australia"
+    echo "7) Germany"
+    echo "8) Netherlands"
+    echo "9) United Kingdom"
+    echo "10) France"
+    echo "11) Worldwide (all)"
+    echo ""
+    
+    read -rp "Choice [1-11]: " choice
+    
+    case "$choice" in
+        1) detect_country ;;
+        2) COUNTRY="United States" ;;
+        3) COUNTRY="Indonesia" ;;
+        4) COUNTRY="Singapore" ;;
+        5) COUNTRY="Japan" ;;
+        6) COUNTRY="Australia" ;;
+        7) COUNTRY="Germany" ;;
+        8) COUNTRY="Netherlands" ;;
+        9) COUNTRY="United Kingdom" ;;
+        10) COUNTRY="France" ;;
+        11) COUNTRY="" ;;
+        *) log_warn "Invalid choice, using auto-detect"; detect_country ;;
+    esac
+}
+
+# Restore backup
+restore_backup() {
+    if [[ -f "$MIRRORLIST_BACKUP" ]]; then
+        sudo cp "$MIRRORLIST_BACKUP" "$MIRRORLIST"
+        log_success "Mirrorlist restored from backup"
+    else
+        log_error "No backup found"
+    fi
+}
+
+# Cleanup
+cleanup() {
+    rm -rf "$TEMP_DIR"
+}
+
+# Usage
+usage() {
+    echo "Usage: rearch-mirrors [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  --country NAME     Filter mirrors by country"
+    echo "  --top N            Select top N mirrors (default: 10)"
+    echo "  --timeout SEC      Timeout for each mirror test (default: 10)"
+    echo "  --restore          Restore mirrorlist from backup"
+    echo "  --list             List current mirrors only"
+    echo "  --help, -h         Show this help message"
+}
+
+# Main
+main() {
+    trap cleanup EXIT
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --country) COUNTRY="$2"; shift ;;
+            --top) TOP_MIRRORS="$2"; shift ;;
+            --timeout) TIMEOUT="$2"; shift ;;
+            --restore) restore_backup; exit 0 ;;
+            --list) cat "$MIRRORLIST"; exit 0 ;;
+            --help|-h) usage; exit 0 ;;
+            *) log_error "Unknown option: $1"; usage; exit 1 ;;
+        esac
+        shift
+    done
+    
+    show_banner
+    
+    # Check dependencies
+    if ! command -v curl &>/dev/null; then
+        log_error "curl is required but not installed"
+        exit 1
+    fi
+    
+    # Country selection
+    if [[ -z "$COUNTRY" ]]; then
+        select_country
+    fi
+    
+    # Fetch and benchmark
+    fetch_mirrors
+    benchmark_all
+    select_top_mirrors
+    generate_mirrorlist
+    apply_mirrorlist
+}
+
+main "$@"

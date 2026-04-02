@@ -1,0 +1,9 @@
+post_install() {
+    echo "==> ReArch keyring installed."
+    echo "==> Run 'pacman-key --populate rearch' to add keys."
+}
+
+post_upgrade() {
+    echo "==> ReArch keyring upgraded."
+    echo "==> Run 'pacman-key --populate rearch' to update keys."
+}
